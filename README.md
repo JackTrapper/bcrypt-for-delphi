@@ -4,7 +4,7 @@ Bcrypt for Delphi
 [Bcrypt](http://en.wikipedia.org/wiki/Bcrypt) is an algorithm designed for hashing passwords, and only passwords; i.e. it:
 
 - is **not** a high-speed, generic, hashing algorithm
-- is **not** a key derivation function (see [PBDKF2](http://en.wikipedia.org/wiki/PBKDF2), [scrypt](http://en.wikipedia.org/wiki/Scrypt))
+- is **not** a key derivation function (see [PBDKF2](http://en.wikipedia.org/wiki/PBKDF2), [scrypt](http://en.wikipedia.org/wiki/Scrypt), [Argon2](https://en.wikipedia.org/wiki/Argon2))
 - is computationally and memory expensive
 - is limited to passwords of 72 bytes
 
@@ -17,7 +17,7 @@ Sample Usage
 
 - To hash a password:
 
-        hash := TBCrypt.HashPassword('correct battery horse staple'); //using default cost factor
+      hash := TBCrypt.HashPassword('correct battery horse staple'); //using default cost factor
     
 - To hash a password specifying your own cost factor:
 
@@ -25,8 +25,10 @@ Sample Usage
     
 - To verify a password:
 
-        passwordRehashNeeded: Boolean;
-        isPasswordValid := TBCrypt.CheckPassword('correct battery horse stapler', expectedHash, {out}passwordRehashNeeded);
+      var
+         passwordRehashNeeded: Boolean;
+      
+      isPasswordValid := TBCrypt.CheckPassword('correct battery horse stapler', expectedHash, {out}passwordRehashNeeded);
 	
 The out parameter `passwordRehashNeeded` indicates if the stored password hash needs to be upgraded. A hash would need to be upgraded if:
 
@@ -36,7 +38,7 @@ The out parameter `passwordRehashNeeded` indicates if the stored password hash n
     
 By convention BCrypt outputs a hash as string such as:
 
-    $2a$12$EA6qjRCeBi8bGgs4rhfn8udEGKmu0ayrZYCEJqf6nNIoytowKFncm
+ $2a$12$EA6qjRCeBi8bGgs4rhfn8udEGKmu0ayrZYCEJqf6nNIoytowKFncm
 
 The parts of the string are:
 
@@ -129,18 +131,15 @@ The version `2b` is not *"better"*, *"stronger"*, or *"more modern"* than `2`, o
 
 In fact, if you have been:
         
-	- converting the text to bytes using UTF-8 encoding
-	- including the null terminator
-	- using a proper string type (as opposed to C's failed attempt to mimic strings with  `char *` type)
+ - converting the text to bytes using UTF-8 encoding
+ - including the null terminator
+ - using a proper string type (as opposed to C's failed attempt to mimic strings with  `char *` type)
 
-then all five versions are functionally identical - for the same input generate the same output.
+then all five versions are functionally identical - for the same input they all generate the same output.
 
 
 Created by [Ian Boyd 5/3/2012](http://stackoverflow.com/a/10441765/9990)
 
 Public Domain  
 For more information, please refer to <http://unlicense.org/>
-
-**Note**: There is also [Scrypt for Delphi](https://github.com/JoseJimeniz/scrypt-for-delphi).
-
 
