@@ -25,10 +25,12 @@ unit Bcrypt;
 		- overcomes the 72-byte limit on passwords; allowing them to be arbitrarily long
 		- avoids potential denial of service with really long passwords
 
-	It is essentially: HashPassword(base64(sha256(password)))
+	It is essentially HashPassword(base64(HMAC_sha256(Password, salt)))
+
+	Sample usage:
 
 		// Hash password with SHA256 prehash:
-		hash := TBCrytpt.EnhancedHashPassword('correct horse battery staple'); // $bcrypt-sha256$
+		hash := TBCrypt.EnhancedHashPassword('correct horse battery staple'); // $bcrypt-sha256$
 
 		// Check enhanced password the same way as regular hashes
 		isPasswordValid := TBCrypt.CheckPassword(szPassword, existingHash, {out}passwordRehashNeeded);
@@ -52,6 +54,13 @@ unit Bcrypt;
 
 	Version History
 	===============
+
+	Version 1.18     20241122
+			- Following the C++ example, hardening the code to be compatible with RangeChecking, Overflowchecking, and type-compatible pointers
+			- make TBlowfishData.Sbox be array[4] of TSBox rather than array[4][255] of UInt32 (to make types compatible)
+			- added typed pointer cast to convert to PLongWord when passing array to BlowfishEncryptECB (which expects PLongWord)
+			- changed functions to accept open arrays - now that i finally understand what they were invented for (thanks ChatGPT)
+			- BREAKING CHANGE: fixed the security vulnerability in enhanced (sha256 allows password shucking; replaced with hmac_sha256)
 
 	Version 1.17     20201125
 			- Simplified the performance timestamp to just two functions, and removed the use of GetPerformanceFrequency.
@@ -267,6 +276,7 @@ interface
 
 uses
 	SysUtils,
+	Windows,
 	{$IFDEF COMPILER_7_UP}Types,{$ENDIF} //Types.pas didn't appear until ~Delphi 7.
 	ComObj, Math;
 
@@ -292,13 +302,20 @@ type
 	UInt32 = Cardinal; //Idera changed the unchangeable "fundamental" LongWord type from UInt32 to UInt64. So we use the "generic" type Cardinal - which hopefully will remain UInt32 going forward
 {$ENDIF}
 
+	TSBox = array[0..255] of UInt32;
+	PSBox = ^TSBox;
+
 	TBlowfishData= record
 		InitBlock: array[0..7] of Byte;    { initial IV }
 		LastBlock: array[0..7] of Byte;    { current IV }
-		SBox: array[0..3, 0..255] of UInt32; //4 SBoxes
+		SBox: array[0..3] of TSBox; //4 SBoxes
 		PBox: array[0..17] of UInt32; //18 subkeys
 	end;
 
+const
+	CP_UTF8 = 65001;
+
+type
 	TBCrypt = class(TObject)
 	private
 		class function TryParseHashString(const hashString: string;
@@ -311,10 +328,19 @@ type
 		class function FormatPasswordHashForBsd(const Version: string; const cost: Integer; const salt: array of Byte; const hash: array of Byte): string;
 		class function FormatEnhancedPasswordHash(const Version: string; const Cost: Integer; const Salt: array of Byte; const Hash: array of Byte): string;
 
-		class function BsdBase64Encode(const data: array of Byte; BytesToEncode: Integer): string;
+		class function BsdBase64Encode(const Data: array of Byte; BytesToEncode: Integer): string;
 		class function BsdBase64Decode(const s: string): TBytes;
 
+		class function Base64Encode(const data: array of Byte): string; //standard base64 alphabet
+
 		class function PasswordStringPrep(const Source: UnicodeString): TBytes;
+		class function StringToBytes(const Source: UnicodeString; const CodePage: Word=CP_UTF8): TBytes;
+
+		class function GenRandomBytes(len: Integer; const data: Pointer): HRESULT; //Ask the operating system for len random bytes
+
+		// Applies sha-256 preshashing to a password. The returned string is suitable to pass to HashPassword.
+		class function Prehash256(const password: UnicodeString; const Salt: array of Byte): string;
+
 
 		class function SelfTestA: Boolean; //known test vectors
 		class function SelfTestB: Boolean; //BSD's base64 encoder/decoder
@@ -329,7 +355,6 @@ type
 		class function SelfTestK: Boolean; //SASLprep rules for passwords
 		class function SelfTestL: Boolean; //Test prehashing a password (sha256 -> base64)
 
-		class function GenRandomBytes(len: Integer; const data: Pointer): HRESULT; //Ask the operating system for len random bytes
 
 		class function GetModernCost(SampleCost: Integer; SampleHashDurationMS: Real): Integer;
 		class function GetModernCost_Benchmark: Integer;
@@ -337,29 +362,29 @@ type
 		class function TimingSafeSameString(const Safe, User: string): Boolean;
 		class function PasswordRehashNeededCore(const Version: string; const Cost: Integer; SampleCost: Integer; SampleHashDurationMS: Real): Boolean;
 
-		class function HashBytes(Data: TBytes; HashAlgorithm: string): string;
-		class function Base64Encode(const data: array of Byte): string;
+		class function HmacSha256(const Data: array of Byte; const Key: array of Byte): TBytes;
+
+		// If you want to handle the cost, salt, and encoding yourself, you can do that.
+		class function HashPassword( const password: UnicodeString; const salt:       array of Byte; const cost: Integer): TBytes; overload;
+		class function CheckPassword(const password: UnicodeString; const salt, hash: array of Byte; const Cost: Integer; out PasswordRehashNeeded: Boolean): Boolean; overload;
+		class function GenerateSalt: TBytes;
+
+		class function EnhancedHashPassword(const Password: UnicodeString; const Salt: array of Byte; Cost: Integer): TBytes; overload;
 	public
 		// Hashes a password into the OpenBSD password-file format (non-standard base-64 encoding). Also validate that BSD style string
-		class function HashPassword(const Password: UnicodeString): string; overload;
-		class function HashPassword(const Password: UnicodeString; Cost: Integer): string; overload;
+		class function HashPassword( const Password: UnicodeString): string; overload;
+		class function HashPassword( const Password: UnicodeString; Cost: Integer): string; overload;
 		class function CheckPassword(const Password: UnicodeString; const ExpectedHashString: string; out PasswordRehashNeeded: Boolean): Boolean; overload;
-
-		// Applies sha-256 preshashing to a password. The returned string is suitable to pass to HashPassword.
-		class function Prehash256(const password: UnicodeString): string;
 
 		// Performs sha-256 pre-hashing on the password (to allow unlimited password lengths, and avoid DoS attacks). Emits '$bcrypt-sha256$' format.
 		class function EnhancedHashPassword(const password: UnicodeString): string; overload;
 		class function EnhancedHashPassword(const password: UnicodeString; Cost: Integer): string; overload;
 
-		// If you want to handle the cost, salt, and encoding yourself, you can do that.
-		class function HashPassword(const password: UnicodeString; const salt: array of Byte; const cost: Integer): TBytes; overload;
-		class function CheckPassword(const password: UnicodeString; const salt, hash: array of Byte; const Cost: Integer; out PasswordRehashNeeded: Boolean): Boolean; overload;
-		class function GenerateSalt: TBytes;
 
 		// Evaluate the cost (or version) of a hash string, and figure out if it needs to be rehashed
 		class function PasswordRehashNeeded(const HashString: string): Boolean;
 
+		// Run self-test diagnostic.
 		class function SelfTest: Boolean;
 	end;
 
@@ -387,7 +412,6 @@ implementation
 uses
 {$IFDEF Sqm}SqmApi,{$ENDIF}
 {$IFDEF BCryptUnitTests}TestFramework,{$ENDIF}
-	Windows,
 	ActiveX;
 
 const
@@ -782,74 +806,149 @@ begin
 end;
 {$ENDIF}
 
-class function TBCrypt.HashBytes(Data: TBytes; HashAlgorithm: string): string;
-var
-	provider: THandle;
-	hash: THandle;
-	digestSize: Cardinal;
-	digest: TBytes;
-	hashAlgorithmID: Cardinal;
-const
-	PROV_RSA_AES			= 24; //Provider type; from WinCrypt.h
-	CRYPT_VERIFYCONTEXT	= $F0000000;
+type
+	BCRYPT_HANDLE				= type THandle;
+	BCRYPT_ALG_HANDLE			= type BCRYPT_HANDLE;
+	BCRYPT_KEY_HANDLE			= type BCRYPT_HANDLE;
+	BCRYPT_HASH_HANDLE		= type BCRYPT_HANDLE;
+	NTSTATUS						= type Cardinal;
 
-	ALG_CLASS_HASH = $8000; // (4 << 13)
-	ALG_TYPE_ANY = 0;
-	ALG_SID_SHA_256 = 12;
-	ALG_SID_SHA_384 = 13;
-	ALG_SID_SHA_512 = 14;
+function BCryptOpenAlgorithmProvider(out hAlgorithm: BCRYPT_ALG_HANDLE; pszAlgId, pszImplementation: PWideChar; dwFlags: Cardinal): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptGetProperty(hObject: BCRYPT_HANDLE; pszProperty: PWideChar; {out}pbOutput: Pointer; cbOutput: Cardinal; out cbResult: Cardinal; dwFlags: Cardinal): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptCreateHash(hAlgorithm: BCRYPT_ALG_HANDLE; out hHash: BCRYPT_HASH_HANDLE; pbHashObject: Pointer; cbHashObject: Cardinal; pbSecret: Pointer; cbSecret: Cardinal; dwFlags: DWORD): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptHashData(hHash: BCRYPT_HASH_HANDLE; pbInput: Pointer; cbInput: Cardinal; dwFlags: Cardinal): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptFinishHash(hHash: BCRYPT_HASH_HANDLE; pbOutput: Pointer; cbOutput: Cardinal; dwFlags: Cardinal): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptDestroyHash(hHash: BCRYPT_HASH_HANDLE): NTSTATUS; stdcall; external 'BCrypt.dll';
+function BCryptCloseAlgorithmProvider(hAlgorithm: BCRYPT_ALG_HANDLE; dwFlags: Cardinal): NTSTATUS; stdcall; external 'BCrypt.dll';
 
-//	CALG_SHA_256 = $0000800c;
-	CALG_SHA_256 = (ALG_CLASS_HASH or ALG_TYPE_ANY or ALG_SID_SHA_256);
-	CALG_SHA_384 = (ALG_CLASS_HASH or ALG_TYPE_ANY or ALG_SID_SHA_384);
-	CALG_SHA_512 = (ALG_CLASS_HASH or ALG_TYPE_ANY or ALG_SID_SHA_512);
-
-	HP_HASHVAL				= $0002;
-	HP_HASHSIZE				= $0004;
+function NT_SUCCESS(const Status: NTSTATUS): Boolean;
 begin
 {
-	HashAlgorithm:
-		- 'SHA256'
-		- 'SHA384'
-		- 'SHA512'
+	Ntdef.h
+
+	NT_SUCCESS(Status)
+
+		00: success		  <--
+		01: information  <--
+		10: warning
+		11: error
+
+	Evaluates to TRUE if the return value specified by
+		- Status is a success type (0 - 0x3FFFFFFF)		00xx
+		- or an informational type (0x40000000 - 0x7FFFFFFF).	01xx
 }
+	Result := ((Status and $80000000) = 0);
+end;
+
+function FormatNTStatusMessage(const NTStatusMessage: NTSTATUS): string;
+var
+	buffer: PChar;
+	len: Integer;
+	Hand: HMODULE;
+begin
+	{
+		KB259693: How to translate NTSTATUS error codes to message strings
+
+		Obtain the formatted message for the given Win32 ErrorCode
+		Let the OS initialize the Buffer variable. Need to LocalFree it afterward.
+	}
+	Hand := SafeLoadLibrary('ntdll.dll');
+
+	buffer := nil;
+	len := FormatMessage(
+			FORMAT_MESSAGE_ALLOCATE_BUFFER or
+			FORMAT_MESSAGE_FROM_SYSTEM or
+//			FORMAT_MESSAGE_IGNORE_INSERTS or
+//			FORMAT_MESSAGE_ARGUMENT_ARRAY or
+			FORMAT_MESSAGE_FROM_HMODULE,
+			Pointer(Hand),
+			NTStatusMessage,
+			MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+			buffer, 0, nil);
+	try
+		//Remove the undesired line breaks and '.' char
+		while (len > 0) and (CharInSet(buffer[len - 1], [#0..#32, '.'])) do Dec(len);
+		//Convert to Delphi string
+		SetString(Result, buffer, len);
+	finally
+		//Free the OS allocated memory block
+		LocalFree(HLOCAL(buffer));
+	end;
+	FreeLibrary(Hand);
+end;
+
+procedure NTStatusCheck(Status: NTSTATUS);
+const
+	SNTError = 'NT Error 0x%.8x: %s';
+begin
+	//Throw on warning or error
+	if not NT_SUCCESS(Status) then
+	begin
+		raise EOleSysError.CreateFmt(SNTError, [
+				HResultFromNT(Status),
+				FormatNTStatusMessage(Status)
+		]);
+	end;
+end;
+
+
+class function TBCrypt.HmacSha256(const Data: array of Byte; const Key: array of Byte): TBytes;
+const
+	BCRYPT_SHA256_ALGORITHM			= 'SHA256';		// OpenAlgorithmProvider.AlgorithmID
+	BCRYPT_ALG_HANDLE_HMAC_FLAG	= $00000008;	// OpenAlgorithmProvider.dwFlags
+	BCRYPT_HASH_LENGTH				= 'HashDigestLength';
+
+var
+	nts: NTSTATUS;
+	algorithm: BCRYPT_ALG_HANDLE;
+	bytesReceived: Cardinal;
+	digestSize: Cardinal;
+	hash: BCRYPT_HASH_HANDLE;
+	digest: TBytes;
+begin
+	{
+		BCrypt hash algorithm identifiers:
+
+			- 'md2'
+			- 'md4'
+			- 'md5'
+			- 'sha1'
+			- 'sha256'
+			- 'sha384'
+			- 'sha512'
+	}
 	SetLength(Result, 0);
 
-	if HashAlgorithm = 'SHA256' then
-		hashAlgorithmID := CALG_SHA_256
-	else if HashAlgorithm = 'SHA384' then
-		hashAlgorithmID := CALG_SHA_384
-	else if HashAlgorithm = 'SHA512' then
-		hashAlgorithmID := CALG_SHA_512
-	else
-		raise EBCryptException.CreateFmt('Unknown hash algorithm: ''%s''', [HashAlgorithm]);
-
-	if not CryptAcquireContext({out}provider, nil, nil, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) then
-		RaiseLastOSError;
+	nts := BCryptOpenAlgorithmProvider({out}algorithm, PWideChar(BCRYPT_SHA256_ALGORITHM), nil, BCRYPT_ALG_HANDLE_HMAC_FLAG);
+	NTStatusCheck(nts);
 	try
-		if not CryptCreateHash(provider, hashAlgorithmID, 0, 0, {out}hash) then
-			RaiseLastOSError;
+		//Get the size of the SHA256 digest. (We already know its 32 bytes, but its never nice to assume)
+		nts := BCryptGetProperty(Algorithm, BCRYPT_HASH_LENGTH, @digestSize, SizeOf(digestSize), {out}bytesReceived, 0);
+		NTStatusCheck(nts);
+
+		if digestSize <> 32 then
+			raise Exception.CreateFmt('Digest size of BCRYPT_SHA512_ALGORITHM is not 32 (%d)', [digestSize]);
+
+		//Create the hash using our key
+		nts := BCryptCreateHash(algorithm, {out}hash, nil, 0, Pointer(@Key[0]), Length(Key), 0);
+		NTStatusCheck(nts);
 		try
 			//Hash the data
-			if not CryptHashData(hash, PByte(Data), Length(Data), 0) then
-				RaiseLastOSError;
+			nts := BCryptHashData(hash, Pointer(@Data[0]), Length(Data), 0);
+			NTStatusCheck(nts);
 
-			//Get the digest size. We know it's 32-bytes, but lets do what is correct.
-			if not CryptGetHashParam(hash, HP_HASHVAL, nil, {var}digestSize, 0) then
-				RaiseLastOSError;
-
-			//Finalize the hash and get the digest
-			SetLength(digest, Integer(digestSize));
-			if not CryptGetHashParam(hash, HP_HASHVAL, @digest[0], {var}digestSize, 0) then
-				RaiseLastOSError;
-
-			Result := TBCrypt.Base64Encode(digest);
+			//Get the final digest
+			SetLength(digest, digestSize);
+			nts := BCryptFinishHash(Hash, @digest[0], Length(digest), 0);
+			NTStatusCheck(nts);
 		finally
-			CryptDestroyHash(hash);
+			BCryptDestroyHash(hash);
 		end;
 	finally
-		CryptReleaseContext(provider, 0);
+		BCryptCloseAlgorithmProvider(algorithm, 0);
 	end;
+
+	Result := digest;
 end;
 
 class function TBCrypt.HashPassword(const password: UnicodeString; const salt: array of Byte; const cost: Integer): TBytes;
@@ -864,7 +963,7 @@ begin
 	}
 
 	//Pseudo-standard dictates that unicode strings are converted to UTF8 (rather than UTF16, UTF32, UTF16LE, ISO-8859-1, Windows-1252, etc)
-	key := TBCrypt.PasswordStringPrep(password);
+	key := TBCrypt.PasswordStringPrep(password+#0); // bcrypt calls for the string to include a null terminator
 	try
 		//Truncate if its longer than 72 bytes (BCRYPT_MaxKeyLen), and burn the excess
 		if Length(key) > BCRYPT_MaxKeyLen then
@@ -885,10 +984,6 @@ end;
 
 {$OVERFLOWCHECKS OFF}
 {$RANGECHECKS OFF}
-
-type
-	TSBox = array[0..255] of UInt32;
-	PSBox = ^TSBox;
 
 {
 	Encrypt a single 64-bit block encoded as two 32-bit halves.
@@ -1186,10 +1281,34 @@ begin
 	//Result := what it is
 end;
 
+class function TBCrypt.EnhancedHashPassword(const Password: UnicodeString; const Salt: array of Byte; Cost: Integer): TBytes;
+var
+	prehashedPassword: UnicodeString;
+begin
+{
+	Generate a hash for the supplied password using the specified cost.
+
+	Sample usage:
+		hash := TBCrypt.EnhancedHashPassword('Correct battery Horse staple', 13); //Cost factor 13
+
+	Returned hash format:
+		$bcrypt-sha256$2a,12$LrmaIX5x4TRtAwEfwJZa1.$2ehnw6LvuIUTM0iz4iz9hTxv21B6KFO
+		\_____________/\/ \/ \____________________/ \_____________________________/
+		  Identifier    |  |        Salt                       Hash
+					 Version  Cost factor
+
+}
+	prehashedPassword := TBCrypt.Prehash256(Password, Salt);
+	try
+		Result := TBCrypt.HashPassword(prehashedPassword, Salt, cost);
+	finally
+		BurnString({var}prehashedPassword);
+	end;
+end;
+
 class function TBCrypt.EnhancedHashPassword(const password: UnicodeString; Cost: Integer): string;
 var
 	salt: TBytes;
-	prehashedPassword: UnicodeString;
 	hash: TBytes;
 begin
 {
@@ -1204,16 +1323,11 @@ begin
 		$bcrypt-sha256$2a,12$LrmaIX5x4TRtAwEfwJZa1.$2ehnw6LvuIUTM0iz4iz9hTxv21B6KFO
 		\_____________/\/ \/ \____________________/ \_____________________________/
 		  Identifier    |  |        Salt                       Hash
-		          Version  Cost factor
+					 Version  Cost factor
 
 }
 	salt := GenerateSalt();
-	prehashedPassword := TBCrypt.Prehash256(password);
-	try
-		hash := TBCrypt.HashPassword(prehashedPassword, salt, cost);
-	finally
-		BurnString({var}prehashedPassword);
-	end;
+	hash := TBCrypt.EnhancedHashPassword(password, salt, cost);
 
 	Result := FormatEnhancedPasswordHash('2b', Cost, salt, hash);
 end;
@@ -1233,13 +1347,46 @@ begin
 		$bcrypt-sha256$2a,12$LrmaIX5x4TRtAwEfwJZa1.$2ehnw6LvuIUTM0iz4iz9hTxv21B6KFO
 
 	Warning: hashes generated by EnhancedHashPassword will be incompatible with
-	         hashes generated by HashPassword
+				hashes generated by HashPassword
 
 		- Normal bcrypt prefix:    "2b"
 		- Enchanced bcrypt prefix: "bcrypt-sha256"
 
 	If the hashes will be used across systems, you must make sure everyone is
 	using the same library.
+
+
+	WARNING: The original algorithm:
+
+			password = base64(sha256(Password));
+			HashPassword(password)
+
+	is vulnerable to password shucking.
+
+	The solution is to perform something like:
+
+			password = base64(HMAC_sha256(Password, salt));
+			HashPassword(password)
+
+	But there is no standard. Some do:
+
+			password = base64(HMAC_sha256(Password, pepper));
+			HashPassword(password)
+
+	And on top of that there isn't a standard way of prefixing:
+
+		$2b$12$ ==> regular
+		$bcrypt-sha256$2b,12$ ==> enchanced using weak form
+
+	Passlib uses:
+
+		$bcrypt-sha256$v=2,t=2b,r=12$
+
+	And their algorithm is:
+
+		Under version 2 of this algorithm (the default as of passlib 1.7.3), the password is run through HMAC-SHA2-256,
+			with the HMAC key set to the bcrypt salt (encoded as a 22 character ascii salt string).
+		Under the older version 1 of this algorithm, the password was instead run through plain SHA2-256.
 }
 
 	cost := TBCrypt.GetModernCost_Benchmark;
@@ -1330,7 +1477,7 @@ begin
 		saltHalfIndex := saltHalfIndex xor 8; //toggle between 0 -> 8 -> 0 -> 8 -> etc
 
 		//and the result encrypted with the new state of the key schedule
-		BlowfishEncryptECB(State, @block, @block);
+		BlowfishEncryptECB(State, PLongWord(@block[0]), PLongWord(@block[0]));
 
 		// The output of the second encryption replaces subkeys P3 and P4. (P[2] and P[3])
 		State.PBox[i*2+0] := LongWord(block[3]) or (block[2] shl 8) or (block[1] shl 16) or (block[0] shl 24);
@@ -1353,7 +1500,7 @@ begin
 			saltHalfIndex := saltHalfIndex xor 8;
 
 			//and the result encrypted with the new state of the key schedule
-			BlowfishEncryptECB(State, @Block, @Block);
+			BlowfishEncryptECB(State, PLongWord(@Block), PLongWord(@Block));
 
 			// The output of the second encryption replaces subkeys S1 and P2. (S[0] and S[1])
 			State.SBox[j, i+0] := LongWord(block[3]) or (block[2] shl 8) or (block[1] shl 16) or (block[0] shl 24);
@@ -1542,6 +1689,34 @@ begin
 	end;
 end;
 
+class function TBCrypt.StringToBytes(const Source: UnicodeString; const CodePage: Word=CP_UTF8): TBytes;
+var
+	strLen: Integer;
+	dw: DWORD;
+const
+	SLenError				= '[TBCrypt.UnicodeStringToBytes] Could not get length of destination string. Error %d (%s)';
+	SConvertStringError	= '[TBCrypt.UnicodeStringToBytes] Could not convert utf16 to utf8 string. Error %d (%s)';
+begin
+	// Determine real size of destination string, in bytes
+	strLen := WideCharToMultiByte(CodePage, 0, PWideChar(Source), Length(Source), nil, 0, nil, nil);
+	if strLen = 0 then
+	begin
+		dw := GetLastError;
+		raise EConvertError.CreateFmt(SLenError, [dw, SysErrorMessage(dw)]);
+	end;
+
+	// Allocate memory for destination string
+	SetLength(Result, strLen);
+
+	// Convert source UTF-16 string (WideString) to the destination using the code-page
+	strLen := WideCharToMultiByte(CodePage, 0, PWideChar(Source), Length(Source), PAnsiChar(Result), strLen, nil, nil);
+	if strLen = 0 then
+	begin
+		dw := GetLastError;
+		raise EConvertError.CreateFmt(SConvertStringError, [dw, SysErrorMessage(dw)]);
+	end;
+end;
+
 class function TBCrypt.CheckPassword(const password: UnicodeString; const ExpectedHashString: string; out PasswordRehashNeeded: Boolean): Boolean;
 var
 	version: string;
@@ -1563,7 +1738,7 @@ begin
 
 	if isEnhanced then
 	begin
-		prehashedPassword := TBCrypt.Prehash256(password);
+		prehashedPassword := TBCrypt.Prehash256(password, salt);
 		hash := TBCrypt.HashPassword(prehashedPassword, salt, cost);
 		BurnString({var}preHashedPassword);
 	end
@@ -1584,7 +1759,7 @@ begin
 	PasswordRehashNeeded := TBcrypt.PasswordRehashNeededCore(version, cost, cost, PerformanceTimestampToMs(t2-t1));
 end;
 
-class function TBCrypt.BsdBase64Encode(const data: array of Byte; BytesToEncode: Integer): string;
+class function TBCrypt.BsdBase64Encode(const Data: array of Byte; BytesToEncode: Integer): string;
 
 	function EncodePacket(b1, b2, b3: Byte; Len: Integer): string;
 	begin
@@ -1607,7 +1782,10 @@ var
 begin
 	Result := '';
 
-	len := BytesToEncode;
+	// NOTE: an open-array parameter contains length information, so generally passing a length is redundant.
+	// But BCrypt algorithm doesn't encode all the bytes of the hash; but instead hashes all BUT the final byte.
+	// So we pass a length.
+	len := BytesToEncode; // Length(data);
 	if len = 0 then
 		Exit;
 
@@ -1656,6 +1834,9 @@ begin
 	Result := Result and SelfTestK;  //SASLprep rules for passwords
 
 	Result := Result and SelfTestL;  //Test prehashing a password (sha256 -> base64)
+
+	if not Result then
+		raise EBCryptException.Create('Self-test failed');
 end;
 
 class function TBCrypt.FormatEnhancedPasswordHash(const Version: string;
@@ -1889,13 +2070,22 @@ class function TBCrypt.PasswordStringPrep(const Source: UnicodeString): TBytes;
 var
 	normalizedLength: Integer;
 	normalized: UnicodeString;
-	strLen: Integer;
 	dw: DWORD;
 const
-	CodePage = CP_UTF8;
-	SLenError = '[PasswordStringPrep] Could not get length of destination string. Error %d (%s)';
-	SConvertStringError = '[PasswordStringPrep] Could not convert utf16 to utf8 string. Error %d (%s)';
+	CodePage					= CP_UTF8;
+	SLenError				= '[PasswordStringPrep] Could not get length of destination string. Error %d (%s)';
+	SConvertStringError	= '[PasswordStringPrep] Could not convert utf16 to utf8 string. Error %d (%s)';
 begin
+{
+	This prepares a password string and converts it to an array of bytes.
+
+	SASL defines some special pre-processing that should happen to any password before you hash it.
+	This is true for bcrypt, scrypt, argon2, SHA2, PBKDF2, etc.
+
+		- Normalize the unicode string to the Compatible (K) Composition (C) form
+		- Unicode has 13 different space characters; convert them all to standard U+0020 SPACE
+		- collapse any runs of multiple spaces into a single U+0020 space character
+}
 	if Length(Source) = 0 then
 	begin
 		SetLength(Result, 0);
@@ -1971,45 +2161,26 @@ begin
 			raise EConvertError.CreateFmt(SLenError, [dw, SysErrorMessage(dw)]);
 		end;
 
-		{
-			Now perform the conversion of UTF-16 to UTF-8
-		}
-		// Determine real size of destination string, in bytes
-		strLen := WideCharToMultiByte(CodePage, 0,
-				PWideChar(normalized), normalizedLength, //Source
-				nil, 0, //Destination
-				nil, nil);
-		if strLen = 0 then
-		begin
-			dw := GetLastError;
-			raise EConvertError.CreateFmt(SLenError, [dw, SysErrorMessage(dw)]);
-		end;
+//		normalized := normalized + #0; // The prepared password includes the null terminator
+{			11/23/2024 This has been removed to the bcrypt hashing portion - it manually appends the bcrypt-requried null terminator.
+				We do this because Prehash256() and the regular hash both call PasswordStringPrep.
+				- Enhanced  doesn't want to include the null terminator in the string before it's prepared into bytes
+				- Regular  *does*   want to include the null terminator in the string before it's prepared into bytes
 
-		// Allocate memory for destination string
-		SetLength(Result, strLen+1); //+1 for the null terminator
-
-		// Convert source UTF-16 string (WideString) to the destination using the code-page
-		strLen := WideCharToMultiByte(CodePage, 0,
-				PWideChar(normalized), normalizedLength, //Source
-				PAnsiChar(Result), strLen, //Destination
-				nil, nil);
-		if strLen = 0 then
-		begin
-			dw := GetLastError;
-			raise EConvertError.CreateFmt(SConvertStringError, [dw, SysErrorMessage(dw)]);
-		end;
-
-		//Set the null terminator
-		Result[strLen] := 0;
+			So we'll just append the null there, in the normal hash path.
+}
+		Result := StringToBytes(normalized, CP_UTF8); // convert to UTF-8
 	finally
-		//Burn the intermediate normalized form
-		BurnString(normalized);
+		BurnString(normalized); //Burn the intermediate normalized form
 	end;
 end;
 
 
-class function TBCrypt.Prehash256(const password: UnicodeString): string;
+class function TBCrypt.Prehash256(const password: UnicodeString; const Salt: array of Byte): string;
 var
+	passwordBytes: TBytes;
+	digest: TBytes;
+	saltString: string;
 	key: TBytes;
 
 	procedure BurnArray(var AArray: TBytes);
@@ -2023,7 +2194,7 @@ var
 
 begin
 {
-	Enhanced mode pre-hashes the password with SHA2-256. It converts the password into a SHA256 digest, e.g.:
+	Enhanced mode pre-hashes the password with HMAC_SHA256. It converts the password into a the keyed-digest, e.g.:
 
 		- "correct horse battery staple"  ==> "C4BBCB1FBEC99D65BF59D85C8CB62EE2DB963F0FE106F483D9AFA73BD4E39A8A"
 
@@ -2045,12 +2216,26 @@ begin
 		- "SHA256"  <--Default of passlib; our old default.
 		- "SHA512"  <--DropBox, but generated a base64 has that is longer than 72 bytes
 }
-	key := TBCrypt.PasswordStringPrep(password);
+
+	// The gotcha is that PassLib's version doesn't use the salt bytes as the HMAC key,
+	// but instead uses the base64 encoding of the salt, and then converts that string to utf-8.
+	// And since we want to try to be maximally compatible with *someone*, we shall do that.
+	saltString := TBCrypt.BsdBase64Encode(salt, Length(salt));
+
+	// Convert the padded salt string into a key byte array so we can HMAC it.
+	key := StringToBytes(saltString, CP_UTF8);
+
+	passwordBytes := TBCrypt.PasswordStringPrep(password); // prehash does not include a null terminator
 	try
-		Result := TBCrypt.HashBytes(key, 'SHA256');
+		// HMAC passwordBytes using the key
+		digest := TBCrypt.HmacSha256(passwordBytes, key);
 	finally
-		BurnArray(key);
+		BurnArray(passwordBytes);
 	end;
+
+	// And then passlib encodes the pre-hashed password using *normal* base64.
+	// So if we want to match their algorithm that is that we will do too.
+	Result := TBCrypt.Base64Encode(digest);
 end;
 
 class function TBCrypt.SelfTestB: Boolean;
@@ -2449,15 +2634,15 @@ begin
 	utf8 := TBCrypt.PasswordStringPrep(password);
 
 	{
-		0xC3 0x84 0x66 0x69 0x6E 0x00
+		0xC3 0x84 0x66 0x69 0x6E
 	}
-	Result := (Length(utf8) = 6);
+	Result := (Length(utf8) = 5);
 	Result := Result and (utf8[0] = $c3);
 	Result := Result and (utf8[1] = $84);
 	Result := Result and (utf8[2] = $66);
 	Result := Result and (utf8[3] = $69);
 	Result := Result and (utf8[4] = $6e);
-	Result := Result and (utf8[5] = $00); //we do include the null terminator
+//	Result := Result and (utf8[5] = $00); //we do include the null terminator. 11/23/2024 We no longer do include the null terminator
 end;
 
 class function TBCrypt.SelfTestJ: Boolean;
@@ -2579,41 +2764,49 @@ begin
 			U+3000	IDEOGRAPHIC SPACE
 	}
 	pass := #$0020;
-	if not CheckUtf8(pass, [$20, 0]) then Result := False;
+	if not CheckUtf8(pass, [$20]) then Result := False;
 	pass := #$00A0;
-	if not CheckUtf8(pass, [$20, 0]) then Result := False;
+	if not CheckUtf8(pass, [$20]) then Result := False;
 	pass := #$2000;
-	if not CheckUtf8(pass, [$20, 0]) then Result := False;
+	if not CheckUtf8(pass, [$20]) then Result := False;
 end;
 
 class function TBCrypt.SelfTestL: Boolean;
 var
-	actual: string;
-	data: TBytes;
+	password: string;
+	salt: TBytes;
+	expected, actual: string;
 begin
-	{
-		From passlib.hash.bcrypt_sha256 - BCrypt+SHA256
-		https://passlib.readthedocs.io/en/stable/lib/passlib.hash.bcrypt_sha256.html
+{
+	/Test prehashing a password (hmac_sha256 -> base64)
+
+	From passlib.hash.bcrypt_sha256 - BCrypt+SHA256
+	https://passlib.readthedocs.io/en/stable/lib/passlib.hash.bcrypt_sha256.html
+
+		Input:    "password" (utf-8 encoded)
+		Salt:     "n79VH.0Q2TMWmt3Oqt9uku" (bsd base64 string, then utf8-encoded)
+		Expected: "7CwRr5rxo2JZcVmSDAi/2JPTkvkAdNy20Cz2LwYC0fw=" (using *normal* base64; not BSD base64)
+						==> [ec 2c 11 af 9a f1 a3 62 59 71 59 92 0c 08 bf d8 93 d3 92 f9 00 74 dc b6 d0 2c f6 2f 06 02 d1 fc] (standard base64)
+						==> [F4 4C 93 B7 BB 73 AB 82 DB 79 7A 14 14 29, 1 E0 B4 55 9B 19 82 7C FD 38 D8 4D 78 37 26 84 DA 1C] (bsd base64)
+
+	My hash result:
+		[$EC, $2C, $11, $AF, $9A, $F1, $A3, $62, $59, $71, $59, $92, $C, 8, $BF, $D8, $93, $D3, $92, $F9, 0, $74, $DC, $B6, $D0, $2C, $F6, $2F, 6, 2, $D1, $FC]
+
+	Result from https://www.liavaag.org/English/SHA-Generator/HMAC/
+
+		ec2c11af9af1a362597159920c08bfd893d392f90074dcb6d02cf62f0602d1fc
 
 
-		Input: "password"
-		Expected: "XohImNooBHFR0OVvjcYpJ3NgPQ1qq73WKhHvch0VQtg="
-	}
+}
 
-	//utf8 version of "password"
-	SetLength(data, 8);
-	data[0] := Ord('p');
-	data[1] := Ord('a');
-	data[2] := Ord('s');
-	data[3] := Ord('s');
-	data[4] := Ord('w');
-	data[5] := Ord('o');
-	data[6] := Ord('r');
-	data[7] := Ord('d');
+	password	:= 'password'; 											// utf8: [70 61 73 73 77 6f 72 64]
+	salt		:= BsdBase64Decode('n79VH.0Q2TMWmt3Oqt9uku');	// utf8: [6e 37 39 56 48 2e 30 51 32 54 4d 57 6d 74 33 4f 71 74 39 75 6b 75] utf8
 
-	actual := TBCrypt.HashBytes(data, 'SHA256');
+	actual := TBCrypt.Prehash256(password, salt);
 
-	Result := ('XohImNooBHFR0OVvjcYpJ3NgPQ1qq73WKhHvch0VQtg=' = actual);
+	expected := '7CwRr5rxo2JZcVmSDAi/2JPTkvkAdNy20Cz2LwYC0fw=';
+
+	Result := (actual = expected);
 end;
 
 class function TBCrypt.PasswordRehashNeeded(const HashString: string): Boolean;
